@@ -9,6 +9,8 @@ user_data/*
 !user_data/notebooks
 !user_data/models
 !user_data/freqaimodels
+!user_data/strategies
+!user_data/docs
 user_data/freqaimodels/*
 user_data/models/*
 user_data/notebooks/*
