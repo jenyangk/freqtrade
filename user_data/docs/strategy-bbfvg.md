@@ -55,9 +55,9 @@ The strategy looks for a confluence of three factors:
         -   Long Exit: Price touches Upper Bollinger Band.
         -   Short Exit: Price touches Lower Bollinger Band.
 -   **Stop Loss**:
-    -   Dynamic Stop Loss based on the FVG structure.
-    -   Long: Stop Loss set just below the Bullish FVG bottom (or 1% below Lower Band if FVG undefined).
-    -   Short: Stop Loss set just above the Bearish FVG top (or 1% above Upper Band if FVG undefined).
+    -   Fixed Stop Loss of 5%.
+    -   Long: Entry Price * 0.95.
+    -   Short: Entry Price * 1.05.
 
 ## Configuration
 
@@ -80,10 +80,12 @@ The strategy allows for multiple entries (DCA) if the trade moves against the in
 
 ## Risk Management
 
-The strategy calculates a **dynamic stop loss** at the moment of entry confirmation.
--   It identifies the FVG boundaries.
--   It sets the stop loss slightly beyond the FVG (0.5% buffer).
--   This "Risk" distance is then used to calculate the "Reward" target (2x Risk).
+The strategy uses a **fixed 5% stop loss** for initial risk calculation.
+-   This "Risk" distance (5%) is then used to calculate the "Reward" targets (1:2, 1:3, 1:4).
+-   **Dynamic Trailing**:
+    -   At 1:2 Profit (10% gain): Stop Loss moves to Breakeven.
+    -   At 1:3 Profit (15% gain): Stop Loss moves to 1:2 level (locking 10% gain).
+    -   At 1:4 Profit (20% gain): Immediate Exit.
 
 ## Plotting
 

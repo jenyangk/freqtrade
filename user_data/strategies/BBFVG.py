@@ -39,6 +39,13 @@ class BBFVG(IStrategy):
     can_short: bool = True
     use_custom_stoploss = True
 
+    order_types = {
+        "entry": "limit",
+        "exit": "limit",
+        "stoploss": "market",
+        "stoploss_on_exchange": False,
+    }
+
     # --- Strategy Parameters ---
     # Bollinger Bands
     bb_window = IntParameter(10, 50, default=20, space="indicator")
@@ -63,7 +70,7 @@ class BBFVG(IStrategy):
     max_dca_multiplier = 1.5  # DCA multiplier
 
     # Default Stoploss (will be overridden by custom_stoploss)
-    stoploss = -0.10
+    stoploss = -0.05
 
     # ROI (using custom exit mostly, but safety net)
     minimal_roi = {
@@ -288,19 +295,6 @@ class BBFVG(IStrategy):
             (dataframe["low"] <= dataframe["bb_lowerband"]), ["exit_short", "exit_tag"]
         ] = (1, "short_exit_bb_lower")
 
-        # Trend Reversal Exit
-        # If EMA fast is above EMA slow, we want to be bullish biased.
-        # So if EMA fast < EMA slow, we are no longer bullish biased -> Exit Long.
-        dataframe.loc[
-            (dataframe["ema_fast"] < dataframe["ema_slow"]), ["exit_long", "exit_tag"]
-        ] = (1, "long_exit_trend_reversal")
-
-        # If EMA slow is above EMA fast, we want to be bearish biased.
-        # So if EMA fast > EMA slow, we are no longer bearish biased -> Exit Short.
-        dataframe.loc[
-            (dataframe["ema_fast"] > dataframe["ema_slow"]), ["exit_short", "exit_tag"]
-        ] = (1, "short_exit_trend_reversal")
-
         return dataframe
 
     def custom_stoploss(
@@ -316,33 +310,49 @@ class BBFVG(IStrategy):
         # We store this in custom_info when trade is confirmed/adjusted
 
         trade_key = trade.open_date_utc.isoformat()
+        
+        # Ensure trade_data is populated from pending_entry if needed
+        if pair in self.custom_info:
+            if "trade_data" not in self.custom_info[pair]:
+                self.custom_info[pair]["trade_data"] = {}
+            
+            # Try to migrate pending_entry if it matches this trade
+            if trade_key not in self.custom_info[pair]["trade_data"] and "pending_entry" in self.custom_info[pair]:
+                pending = self.custom_info[pair]["pending_entry"]
+                # Simple check: if pending entry was recent (within 10 mins)
+                if pending["entry_time"] >= trade.open_date_utc - timedelta(minutes=10):
+                     self.custom_info[pair]["trade_data"][trade_key] = pending
+
         if pair in self.custom_info and "trade_data" in self.custom_info[pair]:
             trade_data = self.custom_info[pair]["trade_data"].get(trade_key)
             if trade_data and "sl_price" in trade_data:
                 sl_price = trade_data["sl_price"]
-                # Calculate percentage difference
-                if trade.is_short:
-                    # Short: SL is above entry. (SL - Current) / Current ? No.
-                    # Freqtrade expects negative percentage from current price (or open price depending on context)
-                    # Actually custom_stoploss returns a percentage relative to OPEN price (usually) or current price?
-                    # Docs: "return value of this method is a percentage of the current price" -> No, it's relative to current_rate?
-                    # Wait, return value is "stoploss percentage relative to current_rate" (if positive? No, usually negative).
-                    # "The returned value is the new stoploss relative to the current_rate."
-                    # Example: return -0.10 means stoploss is 10% below current_rate.
+                entry_price = trade.open_rate
+                
+                # Calculate Risk
+                risk = abs(entry_price - sl_price)
+                if risk == 0: return self.stoploss
 
-                    # For Short: SL Price > Current Rate.
-                    # We want to return (SL_Price - Current_Rate) / Current_Rate ?
-                    # No, stoploss for short is ABOVE.
-                    # If current_rate = 100, SL = 110. Diff = 10. 10/100 = 0.10.
-                    # So return 0.10?
-                    # Freqtrade docs: "Positive values for shorts, Negative values for longs"
+                current_diff = (current_rate - entry_price) if not trade.is_short else (entry_price - current_rate)
+                r_multiple = current_diff / risk
+                
+                new_sl_price = sl_price # Default to initial SL
+                
+                # Dynamic TP / Trailing Logic
+                # 1:2 minimum then 1:3 and 1:4
+                if r_multiple >= 3:
+                    # Move SL to 1:2 (Entry + 2R)
+                    if not trade.is_short:
+                        new_sl_price = entry_price + (2 * risk)
+                    else:
+                        new_sl_price = entry_price - (2 * risk)
+                elif r_multiple >= 2:
+                    # Move SL to Breakeven (Entry)
+                    new_sl_price = entry_price
 
-                    return (sl_price - current_rate) / current_rate
-                else:
-                    # Long: SL Price < Current Rate.
-                    # We want to return (SL_Price - Current_Rate) / Current_Rate.
-                    # If current_rate = 100, SL = 90. Diff = -10. -10/100 = -0.10.
-                    return (sl_price - current_rate) / current_rate
+                # Calculate percentage for Freqtrade
+                # Formula: (new_sl_price - current_rate) / current_rate
+                return (new_sl_price - current_rate) / current_rate
 
         return self.stoploss
 
@@ -355,18 +365,63 @@ class BBFVG(IStrategy):
         current_profit: float,
         **kwargs,
     ):
-        # Check for 2:1 Risk:Reward
+        # Check for 1:4 Target
         trade_key = trade.open_date_utc.isoformat()
         if pair in self.custom_info and "trade_data" in self.custom_info[pair]:
             trade_data = self.custom_info[pair]["trade_data"].get(trade_key)
-            if trade_data and "risk" in trade_data:
-                risk_pct = trade_data["risk"]  # This is positive percentage distance
-                target_profit = risk_pct * float(self.risk_reward.value)
+            if trade_data and "sl_price" in trade_data:
+                sl_price = trade_data["sl_price"]
+                entry_price = trade.open_rate
+                risk = abs(entry_price - sl_price)
+                if risk > 0:
+                    current_diff = (current_rate - entry_price) if not trade.is_short else (entry_price - current_rate)
+                    r_multiple = current_diff / risk
+                    
+                    if r_multiple >= 4:
+                        return "target_1_4"
 
-                if current_profit >= target_profit:
-                    return f"roi_2_1_target ({target_profit:.2%})"
+        # Exit when price touches the opposite band
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        last_candle = dataframe.iloc[-1]
+
+        if trade.is_short:
+            # Short: Exit at Lower Band
+            if current_rate <= last_candle["bb_lowerband"]:
+                return "short_exit_bb_lower"
+        else:
+            # Long: Exit at Upper Band
+            if current_rate >= last_candle["bb_upperband"]:
+                return "long_exit_bb_upper"
 
         return None
+
+    def custom_entry_price(
+        self,
+        pair: str,
+        trade: Optional[Trade],
+        current_time: datetime,
+        proposed_rate: float,
+        entry_tag: Optional[str],
+        side: str,
+        **kwargs,
+    ) -> float:
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        if len(dataframe) > 0:
+            last_candle = dataframe.iloc[-1]
+
+            if side == "long":
+                fvg_top = last_candle.get("fvg_bull_top")
+                # Ensure we enter within the FVG (below or at top)
+                if pd.notna(fvg_top) and proposed_rate > fvg_top:
+                    return fvg_top
+
+            elif side == "short":
+                fvg_bottom = last_candle.get("fvg_bear_bottom")
+                # Ensure we enter within the FVG (above or at bottom)
+                if pd.notna(fvg_bottom) and proposed_rate < fvg_bottom:
+                    return fvg_bottom
+
+        return proposed_rate
 
     def confirm_trade_entry(
         self,
@@ -379,48 +434,36 @@ class BBFVG(IStrategy):
         entry_tag: Optional[str] = None,
         **kwargs,
     ):
-        # Calculate and store Stop Loss price based on FVG
-        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-        if len(dataframe) > 0:
-            last_candle = dataframe.iloc[-1]
+        # Calculate and store Stop Loss price based on fixed 5% risk
+        # We still store it to allow custom_stoploss to calculate R-multiples
+        
+        sl_price = None
 
-            sl_price = None
+        if entry_tag == "long_bb_fvg":
+            # Fixed 5% Stop Loss
+            sl_price = rate * 0.95
 
-            if entry_tag == "long_bb_fvg":
-                # Stop Loss at FVG Bottom
-                fvg_bottom = last_candle.get("fvg_bull_bottom")
-                if pd.notna(fvg_bottom):
-                    sl_price = fvg_bottom * 0.995  # 0.5% buffer below FVG
-                else:
-                    # Fallback to BB Lower * 0.99
-                    sl_price = last_candle["bb_lowerband"] * 0.99
+        elif entry_tag == "short_bb_fvg":
+            # Fixed 5% Stop Loss
+            sl_price = rate * 1.05
 
-            elif entry_tag == "short_bb_fvg":
-                # Stop Loss at FVG Top
-                fvg_top = last_candle.get("fvg_bear_top")
-                if pd.notna(fvg_top):
-                    sl_price = fvg_top * 1.005  # 0.5% buffer above FVG
-                else:
-                    # Fallback to BB Upper * 1.01
-                    sl_price = last_candle["bb_upperband"] * 1.01
+        if sl_price:
+            # Calculate risk percentage
+            risk = abs(rate - sl_price) / rate
 
-            if sl_price:
-                # Calculate risk percentage
-                risk = abs(rate - sl_price) / rate
+            # Store
+            if pair not in self.custom_info:
+                self.custom_info[pair] = {"trade_data": {}}
 
-                # Store
-                if pair not in self.custom_info:
-                    self.custom_info[pair] = {"trade_data": {}}
-
-                # We don't have trade object yet, so we use a temporary pending store?
-                # Or we can use adjust_trade_position to finalize it.
-                # But confirm_trade_entry is called BEFORE trade creation.
-                # We can store it in a 'pending' slot.
-                self.custom_info[pair]["pending_entry"] = {
-                    "sl_price": sl_price,
-                    "risk": risk,
-                    "entry_time": current_time,
-                }
+            # We don't have trade object yet, so we use a temporary pending store?
+            # Or we can use adjust_trade_position to finalize it.
+            # But confirm_trade_entry is called BEFORE trade creation.
+            # We can store it in a 'pending' slot.
+            self.custom_info[pair]["pending_entry"] = {
+                "sl_price": sl_price,
+                "risk": risk,
+                "entry_time": current_time,
+            }
 
         return True
 
