@@ -1,0 +1,52 @@
+{
+  "strategy_name": "MeanReversion",
+  "params": {
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": null,
+      "trailing_stop_positive_offset": 0.0,
+      "trailing_only_offset_is_reached": false
+    },
+    "max_open_trades": {
+      "max_open_trades": 20
+    },
+    "buy": {
+      "adx_strong_threshold": 38,
+      "adx_weak_threshold": 25,
+      "bb_width_max": 0.116,
+      "bb_width_min": 0.02,
+      "min_entry_score": 52,
+      "rsi_long_threshold": 53,
+      "rsi_short_threshold": 30,
+      "volume_multiplier": 1.479,
+      "zscore_threshold": 2.152
+    },
+    "sell": {
+      "partial_exit_enabled": true,
+      "partial_exit_ratio": 0.473,
+      "trailing_profit_offset": 0.017,
+      "trailing_profit_trigger": 0.04
+    },
+    "roi": {
+      "0": 0.393,
+      "350": 0.209,
+      "670": 0.08,
+      "1015": 0
+    },
+    "stoploss": {
+      "stoploss": -0.171
+    },
+    "indicator": {
+      "adx_length": 18,
+      "bb_std": 2.646,
+      "bb_window": 10,
+      "divergence_lookback": 14,
+      "rsi_length": 19,
+      "st_length": 8,
+      "st_multiplier": 3.629,
+      "volume_sma_length": 20
+    }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2025-12-13 01:10:30.495470+00:00"
+}

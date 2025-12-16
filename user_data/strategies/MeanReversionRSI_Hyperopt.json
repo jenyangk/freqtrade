@@ -1,0 +1,38 @@
+{
+  "strategy_name": "MeanReversionRSI_Hyperopt",
+  "params": {
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": null,
+      "trailing_stop_positive_offset": 0.0,
+      "trailing_only_offset_is_reached": false
+    },
+    "max_open_trades": {
+      "max_open_trades": 20
+    },
+    "buy": {
+      "adx_4h_threshold": 41,
+      "adx_threshold": 17,
+      "bb_std": 1.878,
+      "bb_window": 18,
+      "rsi_long_threshold": 62,
+      "rsi_short_threshold": 24,
+      "st_length": 9,
+      "st_multiplier": 2.198
+    },
+    "sell": {
+      "atr_sl_multiplier": 7.623
+    },
+    "roi": {
+      "0": 0.151,
+      "180": 0.06,
+      "480": 0.034,
+      "765": 0
+    },
+    "stoploss": {
+      "stoploss": -0.347
+    }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2025-12-16 02:20:03.509317+00:00"
+}
