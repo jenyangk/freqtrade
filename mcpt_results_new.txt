@@ -1,0 +1,108 @@
+
+======================================================================
+ADVANCED MONTE CARLO PERMUTATION TEST
+======================================================================
+Strategy:         MeanReversionRSIHMM
+Pairs:            BTC/USDT:USDT, ETH/USDT:USDT, SOL/USDT:USDT
+Timeframe:        1h
+Timerange:        20230101-20250215
+Permutations:     50
+Permutation Type: standard 
+Metrics:          profit_total_pct, sharpe_ratio, sortino_ratio, max_drawdown_pct
+======================================================================
+
+[1/2] Running backtest on REAL data...
+
+Real data results:
+  profit_total_pct: 1.22
+  profit_factor: 1.25
+  sharpe_ratio: 0.03
+  sortino_ratio: 0.02
+  max_drawdown_pct: 4.53
+  win_rate: 90.0
+  total_trades: 20
+  avg_profit_pct: 1.06
+  calmar_ratio: 0.67
+
+[2/2] Running backtests on 50 permuted datasets...
+
+Completed 50 valid permutations
+
+============================================================
+COMPREHENSIVE MCPT ANALYSIS
+============================================================
+Strategy:     MeanReversionRSIHMM
+Pairs:        BTC/USDT:USDT, ETH/USDT:USDT, SOL/USDT:USDT
+Timerange:    20230101-20250215
+Permutations: 50
+============================================================
+
+┌─ profit_total_pct ─────────────────────────────────
+│  Real value:            1.2200
+│  Perm mean:             1.3648 ± 4.7070
+│  Perm range:      [-11.3400,   9.8100]
+│  ─────────────────────────────────────────
+│  Z-score:                -0.03
+│  Effect size:            -0.03 (Cohen's d)
+│  Percentile:              42.0%
+│  P-value:               0.5882 ❌
+│  95% CI:          [-8.8387, 9.0932]
+│  ─────────────────────────────────────────
+│  negligible effect size (-0.03), not significant (p=0.5882)
+└───────────────────────────────────────────────────
+
+┌─ sharpe_ratio ─────────────────────────────────
+│  Real value:            0.0300
+│  Perm mean:             0.0748 ± 0.1369
+│  Perm range:      [ -0.2600,   0.4300]
+│  ─────────────────────────────────────────
+│  Z-score:                -0.33
+│  Effect size:            -0.33 (Cohen's d)
+│  Percentile:              40.0%
+│  P-value:               0.6471 ❌
+│  95% CI:          [-0.1532, 0.3742]
+│  ─────────────────────────────────────────
+│  negligible effect size (-0.33), not significant (p=0.6471)
+└───────────────────────────────────────────────────
+
+┌─ sortino_ratio ─────────────────────────────────
+│  Real value:            0.0200
+│  Perm mean:           -15.7336 ± 36.7849
+│  Perm range:      [-100.0000,   4.6000]
+│  ─────────────────────────────────────────
+│  Z-score:                 0.43
+│  Effect size:             0.43 (Cohen's d)
+│  Percentile:              52.0%
+│  P-value:               0.4902 ❌
+│  95% CI:          [-100.0000, 2.1957]
+│  ─────────────────────────────────────────
+│  negligible effect size (0.43), not significant (p=0.4902)
+└───────────────────────────────────────────────────
+
+┌─ max_drawdown_pct ─────────────────────────────────
+│  Real value:            4.5300
+│  Perm mean:             2.9608 ± 3.3578
+│  Perm range:      [  0.0000,  12.8200]
+│  ─────────────────────────────────────────
+│  Z-score:                 0.47
+│  Effect size:             0.47 (Cohen's d)
+│  Percentile:              76.0%
+│  P-value:               0.7647 ❌
+│  95% CI:          [0.0258, 11.5445]
+│  ─────────────────────────────────────────
+│  negligible effect size (0.47), not significant (p=0.7647)
+└───────────────────────────────────────────────────
+============================================================
+SUMMARY
+============================================================
+Significant metrics: 0 / 4
+Overall evidence:    NONE
+
+❌ NO EVIDENCE OF EDGE
+   Strategy performance is consistent with random chance.
+   Likely overfit to historical data.
+============================================================
+
+
+Results saved to: /home/kamikaze/freqtrade/user_data/backtest_results/mcpt/mcpt_advanced_MeanReversionRSIHMM_standard_20251220_174618.json
+Plot saved to: /home/kamikaze/freqtrade/user_data/backtest_results/mcpt/mcpt_advanced_MeanReversionRSIHMM_standard_20251220_174618.png

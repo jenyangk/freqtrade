@@ -3,15 +3,20 @@ import pandas as pd
 import pandas_ta as pta
 import talib.abstract as ta
 from pandas import DataFrame
-from freqtrade.strategy import IStrategy, merge_informative_pair
+from typing import Optional
+from freqtrade.strategy import IStrategy, merge_informative_pair, stoploss_from_absolute
 from freqtrade.persistence import Trade
 from datetime import datetime, timedelta
-from sklearn.mixture import GaussianMixture
+from hmmlearn.hmm import GaussianHMM
+import logging
 
-class MeanReversionRSI(IStrategy):
+logger = logging.getLogger(__name__)
+
+class MeanReversionRSIHMM(IStrategy):
     """
-    MeanReversionRSI Strategy based on Jesse Trade strategy.
+    MeanReversionRSIHMM Strategy
     
+    Based on MeanReversionRSI but using HMM for regime detection.
     Logic:
     - Long when RSI(4h) > 70, Supertrend(4h) is UP, ADX > 20, ADX(4h) > 40.
     - Short when RSI(4h) < 30, Supertrend(4h) is DOWN, ADX > 20, ADX(4h) > 40.
@@ -29,8 +34,9 @@ class MeanReversionRSI(IStrategy):
         "0": 100
     }
 
-    # Stoploss: We use custom stoploss
+    # Stoploss: We use a wide default and handle specific SL in custom_exit
     stoploss = -0.99
+    use_custom_stoploss = False
 
     # Trailing stop:
     trailing_stop = False
@@ -44,7 +50,7 @@ class MeanReversionRSI(IStrategy):
     ignore_roi_if_entry_signal = False
 
     # Number of candles the strategy requires before producing valid signals
-    startup_candle_count = 100
+    startup_candle_count = 1000 # Increased for HMM stability
 
     # Optional order type mapping.
     order_types = {
@@ -60,9 +66,10 @@ class MeanReversionRSI(IStrategy):
         'exit': 'gtc'
     }
     
-    # Kelly Criterion Parameters
+    # Trailing stop:
+    trailing_stop = False # We will implement it in custom_stoploss
     use_kelly = True
-    kelly_fraction = 0.5  # Half-Kelly for safety
+    kelly_fraction = 0.3
     kelly_lookback = 30   # Number of trades to look back
 
     # Regime Detection Parameters
@@ -70,6 +77,9 @@ class MeanReversionRSI(IStrategy):
     
     # Cache for market regime to avoid re-calculating for every pair
     _btc_regime_cache = None
+    
+    # Leverage
+    leverage_value = 5.0
     
     # Plot configuration
     plot_config = {
@@ -98,18 +108,12 @@ class MeanReversionRSI(IStrategy):
     def leverage(self, pair: str, current_time: datetime, current_rate: float,
                  proposed_leverage: float, max_leverage: float, entry_tag: str, side: str,
                  **kwargs) -> float:
-        """
-        Use 5x leverage as per strategy description.
-        """
-        return 5.0
+        return self.leverage_value
 
     def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
                             proposed_stake: float, min_stake: float, max_stake: float,
                             leverage: float, entry_tag: str, side: str,
                             **kwargs) -> float:
-        """
-        Calculate stake amount using Kelly Criterion and Risk Management.
-        """
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         if len(dataframe) == 0:
             return proposed_stake
@@ -120,13 +124,11 @@ class MeanReversionRSI(IStrategy):
         if atr == 0:
             return proposed_stake
             
-        # 1. Calculate Kelly Fraction if enabled
-        risk_pct = 0.03 # Default risk
+        risk_pct = 0.04 # Default risk
         
         if self.use_kelly:
             trades = Trade.get_trades_proxy(is_open=False)
             if len(trades) >= self.kelly_lookback:
-                # Get last N trades
                 last_trades = trades[-self.kelly_lookback:]
                 wins = [t for t in last_trades if t.close_profit > 0]
                 losses = [t for t in last_trades if t.close_profit <= 0]
@@ -138,19 +140,12 @@ class MeanReversionRSI(IStrategy):
                     
                     if avg_loss > 0:
                         profit_factor = avg_win / avg_loss
-                        # Kelly Formula: f = p - (1-p)/b
                         kelly_f = win_rate - (1 - win_rate) / profit_factor
-                        
-                        # Apply fractional Kelly and cap it
-                        risk_pct = max(0.01, min(0.10, kelly_f * self.kelly_fraction))
+                        risk_pct = max(0.01, min(0.05, kelly_f * self.kelly_fraction))
         
         total_capital = self.wallets.get_total_stake_amount()
         risk_amount = total_capital * risk_pct
-        
-        # Stoploss is 6 * ATR
         sl_distance = 6 * atr
-        
-        # Calculate position size such that if SL is hit, loss is risk_amount
         position_size = risk_amount * current_rate / sl_distance
         
         if leverage:
@@ -161,71 +156,92 @@ class MeanReversionRSI(IStrategy):
     def informative_pairs(self):
         pairs = self.dp.current_whitelist()
         informative = [(pair, '4h') for pair in pairs]
-        
-        # Find a BTC pair in the whitelist or construct one
         btc_pair = "BTC/USDT"
         for p in pairs:
             if p.startswith("BTC/"):
                 btc_pair = p
                 break
-        
         if (btc_pair, self.timeframe) not in informative:
             informative.append((btc_pair, self.timeframe))
-            
         return informative
 
-    def get_market_regime(self, dataframe: DataFrame) -> DataFrame:
+    def get_hmm_regime(self, dataframe: DataFrame) -> DataFrame:
         """
-        Identify market regime using Gaussian Mixture Model.
-        Regimes: 0: Bear, 1: Sideways/Mean-Reverting, 2: Bull
+        Identify market regime using Hidden Markov Model with a rolling window.
+        Features: Returns, Volatility, Range.
         """
         df = dataframe.copy()
-        
-        # Features for regime detection
         df['returns'] = np.log(df['close'] / df['close'].shift(1))
         df['volatility'] = df['returns'].rolling(window=20).std()
         df['range'] = (df['high'] - df['low']) / df['close']
-        
         df = df.dropna()
         
-        if len(df) < 100:
+        if len(df) < self.startup_candle_count:
             df = dataframe.copy()
-            df['regime'] = 1 # Default to sideways
+            df['regime'] = 1
             return df[['date', 'regime']]
             
         features = df[['returns', 'volatility', 'range']].values
         
-        # We use a fixed seed for reproducibility in backtesting
-        gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=42)
-        gmm.fit(features)
+        window_size = 1000 # Increased window for more stable regimes
+        regimes = np.zeros(len(df))
+        regimes[:] = 1 
+        step = 100
         
-        regimes = gmm.predict(features)
-        
-        # Map regimes to Bull/Bear/Sideways based on mean returns
-        means = gmm.means_[:, 0] # Mean returns of each component
-        sorted_indices = np.argsort(means)
-        
-        # sorted_indices[0] is Bear (lowest return), [1] is Sideways, [2] is Bull
-        mapping = {sorted_indices[0]: 0, sorted_indices[1]: 1, sorted_indices[2]: 2}
-        df['regime'] = [mapping[r] for r in regimes]
-        
+        for i in range(window_size, len(df), step):
+            train_data = features[i-window_size:i]
+            # Standardize features
+            mean = np.mean(train_data, axis=0)
+            std = np.std(train_data, axis=0)
+            std[std == 0] = 1.0 
+            train_data_std = (train_data - mean) / std
+            
+            model = GaussianHMM(n_components=3, covariance_type="diag", n_iter=100, random_state=42)
+            try:
+                model.fit(train_data_std)
+                future_idx = min(i + step, len(df))
+                future_data = features[i:future_idx]
+                if len(future_data) > 0:
+                    future_data_std = (future_data - mean) / std
+                    pred = model.predict(future_data_std)
+                    
+                    # Map regimes based on mean returns
+                    means = model.means_[:, 0]
+                    sorted_indices = np.argsort(means)
+                    mapping = {sorted_indices[0]: 0, sorted_indices[1]: 1, sorted_indices[2]: 2}
+                    regimes[i:future_idx] = [mapping[p] for p in pred]
+            except Exception as e:
+                logger.error(f"HMM Fit Error: {e}")
+                continue
+                
+        df['regime'] = regimes
         return df[['date', 'regime']]
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # 1. Calculate indicators for current timeframe
         dataframe['adx'] = ta.ADX(dataframe, timeperiod=14)
+        dataframe['rsi'] = ta.RSI(dataframe, timeperiod=14)
         dataframe['atr'] = ta.ATR(dataframe, timeperiod=14)
+        dataframe['ema_200'] = ta.EMA(dataframe, timeperiod=200)
+        dataframe['ema_50'] = ta.EMA(dataframe, timeperiod=50)
         
-        bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.000, nbdevdn=2.000, matype=0)
+        bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
         dataframe['bb_upperband'] = bollinger['upperband']
         dataframe['bb_middleband'] = bollinger['middleband']
         dataframe['bb_lowerband'] = bollinger['lowerband']
         
-        # BB Width
         dataframe['bbw'] = (dataframe['bb_upperband'] - dataframe['bb_lowerband']) / dataframe['bb_middleband']
-        dataframe['bbw_sma'] = dataframe['bbw'].rolling(window=20).mean()
+        dataframe['bbw_sma'] = dataframe['bbw'].rolling(window=50).mean()
+        
+        # Z-Score
+        dataframe['sma_20'] = dataframe['close'].rolling(window=20).mean()
+        dataframe['stddev_20'] = dataframe['close'].rolling(window=20).std()
+        dataframe['zscore'] = (dataframe['close'] - dataframe['sma_20']) / dataframe['stddev_20']
+        
+        dataframe['volume_sma'] = dataframe['volume'].rolling(window=20).mean()
+        
+        # ROC 24h
+        dataframe['roc_24h'] = ta.ROC(dataframe, timeperiod=24)
 
-        # 2. Calculate indicators for informative timeframe (4h)
         informative = self.dp.get_pair_dataframe(pair=metadata['pair'], timeframe='4h')
         informative['rsi'] = ta.RSI(informative, timeperiod=14)
         informative['adx'] = ta.ADX(informative, timeperiod=14)
@@ -234,48 +250,48 @@ class MeanReversionRSI(IStrategy):
         st_dir_col = [col for col in st.columns if col.startswith('SUPERTd')][0]
         informative['supertrend'] = st[st_dir_col]
 
-        # Merge informative 4h
         dataframe = merge_informative_pair(dataframe, informative, self.timeframe, '4h', ffill=True)
 
-        # 3. Market Regime Detection (using BTC/USDT as proxy)
+        # Clear cache if we are starting a new analysis (e.g. in lookahead-analysis)
+        if len(dataframe) < self.startup_candle_count + 100:
+            self._btc_regime_cache = None
+
         if self.use_regime_filter:
             if self._btc_regime_cache is None:
-                # In futures, the pair name in the whitelist is usually BTC/USDT:USDT
-                btc_pair = "BTC/USDT"
-                for p in self.dp.current_whitelist():
-                    if p.startswith("BTC/"):
-                        btc_pair = p
+                # Try multiple possible BTC pair names
+                for btc_pair in ["BTC/USDT:USDT", "BTC/USDT", "BTC/BUSD"]:
+                    btc_df = self.dp.get_pair_dataframe(pair=btc_pair, timeframe='1h')
+                    if not btc_df.empty:
+                        logger.info(f"Found BTC data for {btc_pair}")
+                        self._btc_regime_cache = self.get_hmm_regime(btc_df)
                         break
                 
-                btc_df = self.dp.get_pair_dataframe(pair=btc_pair, timeframe=self.timeframe)
-                if not btc_df.empty:
-                    self._btc_regime_cache = self.get_market_regime(btc_df)
+                if self._btc_regime_cache is None:
+                    logger.warning("Could not find BTC data for regime detection!")
             
             if self._btc_regime_cache is not None:
-                # Merge on date to ensure alignment
                 dataframe = pd.merge(dataframe, self._btc_regime_cache, on='date', how='left')
                 dataframe['market_regime'] = dataframe['regime'].ffill().fillna(1)
+                # Drop the temporary 'regime' column to keep dataframe clean
+                dataframe = dataframe.drop(columns=['regime'])
             else:
                 dataframe['market_regime'] = 1
         else:
             dataframe['market_regime'] = 1
 
-        # 4. Relative Strength (ROC 24h)
-        dataframe['roc_24h'] = ta.ROC(dataframe, timeperiod=24)
-
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Informative columns have suffix _4h
+        # Trend-Following Mean Reversion (Synchronized with Original Strategy)
         
         conditions_long = (
             (dataframe['rsi_4h'] > 70) &
             (dataframe['supertrend_4h'] == 1) & # Uptrend
             (dataframe['adx'] > 20) &
             (dataframe['adx_4h'] > 40) &
-            (dataframe['market_regime'] >= 1) & # Bull or Sideways
+            (dataframe['market_regime'] >= 1) & # Bull or Sideways (HMM Filter)
             (dataframe['roc_24h'] > 0) &         # Relative Strength
-            (dataframe['bbw'] < dataframe['bbw_sma'] * 1.5) # Volatility filter: avoid entering during crashes
+            (dataframe['bbw'] < dataframe['bbw_sma'] * 1.5) # Volatility filter
         )
         
         conditions_short = (
@@ -283,7 +299,7 @@ class MeanReversionRSI(IStrategy):
             (dataframe['supertrend_4h'] == -1) & # Downtrend
             (dataframe['adx'] > 20) &
             (dataframe['adx_4h'] > 40) &
-            (dataframe['market_regime'] <= 1) & # Bear or Sideways
+            (dataframe['market_regime'] <= 1) & # Bear or Sideways (HMM Filter)
             (dataframe['roc_24h'] < 0) &         # Relative Weakness
             (dataframe['bbw'] < dataframe['bbw_sma'] * 1.5) # Volatility filter
         )
@@ -294,11 +310,7 @@ class MeanReversionRSI(IStrategy):
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Exit logic:
-        # Long: Take profit at BB Upper OR Trend Reversal
-        # Short: Take profit at BB Lower OR Trend Reversal
-        
-        # Signal exit if price crosses the band or trend reverses
+        # Exit logic from MeanReversionRSI.py
         dataframe.loc[
             (dataframe['close'] >= dataframe['bb_upperband']) |
             (dataframe['supertrend_4h'] == -1), # Exit long if 4h trend turns bearish
@@ -315,44 +327,43 @@ class MeanReversionRSI(IStrategy):
 
     def custom_entry_price(self, pair: str, current_time: datetime, proposed_rate: float,
                            entry_tag: str, side: str, **kwargs) -> float:
-        # Jesse: 
-        # Long Entry: BB Lower
-        # Short Entry: BB Upper
-        
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         last_candle = dataframe.iloc[-1].squeeze()
-        
         if side == 'long':
             return last_candle['bb_lowerband']
         else:
             return last_candle['bb_upperband']
 
-    def custom_stoploss(self, pair: str, trade: Trade, current_time: datetime,
-                        current_rate: float, current_profit: float, **kwargs) -> float:
-        """
-        Custom stoploss logic.
-        Uses the ATR at the time of entry to set a fixed stoploss.
-        """
+    def custom_exit(self, pair: str, trade: Trade, current_time: datetime, current_rate: float,
+                    current_profit: float, **kwargs) -> Optional[str]:
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-        
-        # Find the candle where the trade was opened
-        # We use trade.open_date_utc and find the last candle before or at that time
         entry_candle = dataframe.loc[dataframe['date'] <= trade.open_date_utc]
         if entry_candle.empty:
-            return self.stoploss
+            return None
             
         entry_candle = entry_candle.iloc[-1]
         atr = entry_candle['atr']
+        regime = entry_candle['market_regime']
         
-        # Jesse: stop_loss_price = entry_price +/- (self.atr * 6)
-        if trade.is_short:
-            sl_price = trade.open_rate + (atr * 6)
-            if current_rate >= sl_price:
-                return -0.0001 # Trigger exit
-            # Return distance as percentage of current price
-            return -(sl_price - current_rate) / current_rate
+        # Regime-Adaptive Stop Loss Multiplier
+        # Bull: 8x ATR (Give it room)
+        # Sideways: 4x ATR (Tighten up)
+        # Bear: 6x ATR (Standard)
+        if regime == 2:
+            sl_mult = 8.0
+        elif regime == 1:
+            sl_mult = 4.0
         else:
-            sl_price = trade.open_rate - (atr * 6)
+            sl_mult = 6.0
+            
+        # Fixed stop loss from entry price
+        if trade.is_short:
+            sl_price = trade.open_rate + (atr * sl_mult)
+            if current_rate >= sl_price:
+                return f"atr_stoploss_{sl_mult}x"
+        else:
+            sl_price = trade.open_rate - (atr * sl_mult)
             if current_rate <= sl_price:
-                return -0.0001 # Trigger exit
-            return -(current_rate - sl_price) / current_rate
+                return f"atr_stoploss_{sl_mult}x"
+                
+        return None
